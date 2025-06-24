@@ -138,6 +138,8 @@ def main():
     rt = dt_.now(); rt = f"{rt.year}_{rt.month:0>2}{rt.day:0>2}_{rt.hour:0>2}{rt.minute:0>2}"
     OUTPUT_PATH = args.Output if args.Output else f"{IN_CNV_PATH[:-4]}_{rt}"
     permutation = args.Permutation if args.Permutation else "F"
+    # Define the total number of permutations we will compute and later load.
+    N_PERMUTATIONS = 500  # keep this consistent across generation and analysis
 
     PCKAGE_PATH = getPath(PCKAGE_PATH).replace("//", "/")
     IN_CNV_PATH = getPath(IN_CNV_PATH).replace("//", "/")
@@ -215,12 +217,17 @@ def main():
         print("This will take a long time! Please have some coffee.")
         # Use Python implementation for RNA permutation
         if NUCLEC_ACID == "R":
+            import shutil
+            # Recreate permutation directory each run to avoid stale files
+            if os.path.exists(PERMUT_PATH):
+                shutil.rmtree(PERMUT_PATH)
+            os.makedirs(PERMUT_PATH, exist_ok=True)
             gene_info = pd.read_csv(GENPOS_PATH, sep="\t", header=None)
             dedup_cnv = pd.read_csv(DE_DUP_PATH, sep="\t", index_col=0)
             permute_gene_cnv(
                 cnv_df=dedup_cnv,
                 reference_df=gene_info,
-                n_permutations=500,
+                n_permutations=N_PERMUTATIONS,
                 bin_size=int(GENE_BIN_SZ),
                 outdir=PERMUT_PATH,
                 prefix="permute"
@@ -265,7 +272,7 @@ def main():
     lsa_df = pd.DataFrame(lsa_records)
     # Load permutation results (binned CNVs)
     perm_cfls = defaultdict(list)  # (node, feature) -> list of permuted CFLs
-    for j in range(1, 101):
+    for j in range(1, N_PERMUTATIONS + 1):
         perm_cnv_path = os.path.join(PERMUT_PATH, f"permute.{j}.CNV.txt")
         if not os.path.exists(perm_cnv_path):
             continue
@@ -283,7 +290,7 @@ def main():
     for idx, row in lsa_df.iterrows():
         key = (row['cell'], row['region'])
         observed = row['Score']
-        perm_scores = np.array(perm_cfls.get(key, [0]*100))
+        perm_scores = np.array(perm_cfls.get(key, [0]*N_PERMUTATIONS))
         if len(perm_scores) == 0:
             pval = 1.0
         else:

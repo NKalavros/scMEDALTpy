@@ -19,19 +19,10 @@ def read_cnv(in_seg_path):
     # Ensure copy numbers are integers.
     df = df.round().astype(int)
 
-    chr_scan = [f"chr{i}" for i in range(1, 25)] + ["chrX", "chrY"]
-    chr_exis = df.columns.str.replace("_.*$", "", regex=True)
-    chr_locs = {}
-    for chr_i in chr_scan:
-        chr_segs = sum(chr_exis == chr_i)
-        if chr_segs > 0:
-            chr_locs[chr_i] = chr_segs
-    cell_lst = list(df.index)
-    node_dic = {i: [] for i in cell_lst}
-    for chr_i in chr_locs:
-        seg_i = chr_exis == chr_i
-        for cel_j in cell_lst:
-            node_dic[cel_j] = node_dic[cel_j] + [list(df.loc[cel_j, seg_i])]
+    # Build node_dic: list of segment lists (each segment as length-1 list) to
+    # preserve compatibility with downstream `dist` routine without relying on
+    # a particular column-naming convention (e.g., "chr1_1" vs "chr1:p11").
+    node_dic = {cell: [[int(cn)] for cn in df.loc[cell].tolist()] for cell in df.index}
 
     # Identify a diploid (or the most diploid-like) cell to serve as root
     deviations = (df - 2).abs().sum(axis=1)
@@ -39,7 +30,6 @@ def read_cnv(in_seg_path):
     if diploids:
         root = diploids[0]
     else:
-        # Select the cell with the minimal total deviation
         root = deviations.idxmin()
         print(f"No perfectly diploid cell found. Using {root} (least deviated) as root.")
     return node_dic, str(root)

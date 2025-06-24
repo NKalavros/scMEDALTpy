@@ -25,7 +25,7 @@ def get_band_name(bands, chrom, start, end):
     else:
         return f"{chrom}:{overlaps[0][2]}-{overlaps[-1][2]}"
 
-def permute_gene_cnv(cnv_df: pd.DataFrame, reference_df: pd.DataFrame, n_permutations: int = 100, bin_size: int = 30, outdir: str = "./permutation", prefix: str = "permute", band_file: str = None): 
+def permute_gene_cnv(cnv_df: pd.DataFrame, reference_df: pd.DataFrame, n_permutations: int = 500, bin_size: int = 30, outdir: str = "./permutation", prefix: str = "permute", band_file: str = None): 
     """
     For each permutation:
       - For each chromosome, shuffle the gene rows within that chromosome independently across all cells.
