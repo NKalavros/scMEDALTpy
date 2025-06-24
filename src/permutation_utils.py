@@ -25,14 +25,44 @@ def get_band_name(bands, chrom, start, end):
     else:
         return f"{chrom}:{overlaps[0][2]}-{overlaps[-1][2]}"
 
-def permute_gene_cnv(cnv_df: pd.DataFrame, reference_df: pd.DataFrame, n_permutations: int = 100, bin_size: int = 30, outdir: str = "./permutation", prefix: str = "permute", band_file: str = None): 
+def permute_gene_cnv(cnv_df: pd.DataFrame, reference_df: pd.DataFrame, n_permutations: int = 100, bin_size: int = 30, outdir: str = "./permutation", prefix: str = "permute", band_file: str = None, seed: Optional[int] = None, debug: bool = False):
     """
     For each permutation:
       - For each chromosome, shuffle the gene rows within that chromosome independently across all cells.
       - Bin the permuted gene-level CNV.
       - Write both the permuted gene-level CNV and the binned CNV to the output directory.
+
+    Parameters
+    ----------
+    cnv_df : pd.DataFrame
+        Gene-level CNV matrix (rows = genes, columns = cells).
+    reference_df : pd.DataFrame
+        Gene annotation table with columns: gene, chr, start, end.
+    n_permutations : int, default 100
+        Number of permutation replicates to generate.
+    bin_size : int, default 30
+        Number of genes per bin when aggregating to segmental level.
+    outdir : str, default "./permutation"
+        Directory in which to write permuted CNV files.
+    prefix : str, default "permute"
+        Filename prefix for generated files.
+    band_file : str or None
+        Optional cytoband BED file to map genomic coordinates to cytoband names.
+    seed : int or None, default None
+        Random seed for reproducibility. If provided, the same seed will yield identical
+        permutation results across runs.
+    debug : bool, default False
+        Whether to print debug output.
     """
+    # Set random seed for reproducibility if provided
+    if seed is not None:
+        np.random.seed(seed)
+
     os.makedirs(outdir, exist_ok=True)
+
+    if debug:
+        print(f"DEBUG: Generating {n_permutations} permuted CNV profiles (bin size={bin_size}) to '{outdir}'...")
+
     # Prepare chromosome info for each gene
     gene_chr = reference_df.set_index(0)[1].astype(str)
     gene_chr = gene_chr.reindex(cnv_df.index)
@@ -88,4 +118,8 @@ def permute_gene_cnv(cnv_df: pd.DataFrame, reference_df: pd.DataFrame, n_permuta
         # Bin and write binned CNV
         binned_cnv = bin_cnv(permuted_cnv, reference_df, bin_size, bands=bands)
         binned_cnv_path = os.path.join(outdir, f"{prefix}.{j}.CNV.txt")
-        binned_cnv.to_csv(binned_cnv_path, sep="\t", header=True, index=True, quoting=3) 
+        binned_cnv.to_csv(binned_cnv_path, sep="\t", header=True, index=True, quoting=3)
+
+        # Progress logging
+        if debug and (j % max(1, n_permutations // 10) == 0 or j == n_permutations):
+            print(f"DEBUG: Completed {j}/{n_permutations} permutations") 
