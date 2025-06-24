@@ -144,7 +144,12 @@ def main():
     rt = dt_.now(); rt = f"{rt.year}_{rt.month:0>2}{rt.day:0>2}_{rt.hour:0>2}{rt.minute:0>2}"
     OUTPUT_PATH = args.Output if args.Output else f"{IN_CNV_PATH[:-4]}_{rt}"
     permutation = args.Permutation if args.Permutation else "F"
+<<<<<<< HEAD
     debug = args.debug
+=======
+    # Define the total number of permutations we will compute and later load.
+    N_PERMUTATIONS = 500  # keep this consistent across generation and analysis
+>>>>>>> main
 
     PCKAGE_PATH = getPath(PCKAGE_PATH).replace("//", "/")
     IN_CNV_PATH = getPath(IN_CNV_PATH).replace("//", "/")
@@ -232,6 +237,11 @@ def main():
         print("This will take some time...")
         
         if NUCLEC_ACID == "R":
+            import shutil
+            # Recreate permutation directory each run to avoid stale files
+            if os.path.exists(PERMUT_PATH):
+                shutil.rmtree(PERMUT_PATH)
+            os.makedirs(PERMUT_PATH, exist_ok=True)
             gene_info = pd.read_csv(GENPOS_PATH, sep="\t", header=None)
             dedup_cnv = pd.read_csv(DE_DUP_PATH, sep="\t", index_col=0)
             
@@ -239,7 +249,11 @@ def main():
             permute_gene_cnv(
                 cnv_df=dedup_cnv,
                 reference_df=gene_info,
+<<<<<<< HEAD
                 n_permutations=500,  # Match R version
+=======
+                n_permutations=N_PERMUTATIONS,
+>>>>>>> main
                 bin_size=int(GENE_BIN_SZ),
                 outdir=PERMUT_PATH,
                 prefix="permute",
@@ -288,6 +302,7 @@ def main():
             })
     
     lsa_df = pd.DataFrame(lsa_records)
+<<<<<<< HEAD
     
     if debug:
         print(f"DEBUG: LSA records for {len(lsa_df)} node-region pairs")
@@ -300,6 +315,130 @@ def main():
         pvals = empirical_pvals_per_region(
             lsa_df, real_tree, real_cnv, PERMUT_PATH, 
             n_perms=500, root=root, debug=debug
+=======
+    # Load permutation results (binned CNVs)
+    perm_cfls = defaultdict(list)  # (node, feature) -> list of permuted CFLs
+    for j in range(1, N_PERMUTATIONS + 1):
+        perm_cnv_path = os.path.join(PERMUT_PATH, f"permute.{j}.CNV.txt")
+        if not os.path.exists(perm_cnv_path):
+            continue
+        perm_cnv = pd.read_csv(perm_cnv_path, sep="\t", index_col=0)
+        for node in real_tree:
+            if node == root:
+                continue
+            lineage = get_subtree(real_tree, node)
+            lineage = [cell for cell in lineage if cell != 'root']
+            cfl = lineage_cfl(perm_cnv, lineage)
+            for feature, score in cfl.items():
+                perm_cfls[(node, feature)].append(score)
+    # Compute empirical p-values for each (node, feature)
+    pvals = []
+    for idx, row in lsa_df.iterrows():
+        key = (row['cell'], row['region'])
+        observed = row['Score']
+        perm_scores = np.array(perm_cfls.get(key, [0]*N_PERMUTATIONS))
+        if len(perm_scores) == 0:
+            pval = 1.0
+        else:
+            if row['CNA'] == 'AMP':
+                pval = (np.sum(perm_scores >= observed) + 1) / (len(perm_scores) + 1)
+            else:
+                pval = (np.sum(perm_scores <= observed) + 1) / (len(perm_scores) + 1)
+        pvals.append(pval)
+    lsa_df['pvalue'] = pvals
+    # FDR correction
+    rejected, pvals_corr = fdr_correction(lsa_df['pvalue'].values, alpha=0.05)
+    lsa_df['adjustp'] = pvals_corr
+    lsa_df['significant'] = rejected
+    # Output segmental LSA results (significant only)
+    sig_lsa_df = lsa_df[lsa_df['significant']].copy()
+
+    # If no significant CNAs, gracefully skip downstream merging/pruning
+    if sig_lsa_df.empty:
+        print("No significant CNAs detected after FDR correction — skipping merging and pruning steps.")
+        merged_out = pd.DataFrame(columns=['region', 'Score', 'pvalue', 'adjustp',
+                                           'cell', 'depth', 'subtreesize', 'CNA'])
+    else:
+        # Build cytoband order map for adjacency-aware merging
+        cytoband_order = {}
+        with open(band_file) as f:
+            for line in f:
+                chrom, start, end, band = line.strip().split('\t')
+                if chrom not in cytoband_order:
+                    cytoband_order[chrom] = []
+                cytoband_order[chrom].append(band)
+
+        # Helper to parse band region names (e.g., chr7:q22.3-q31.2)
+        def parse_band(region):
+            m = re.match(r'(chr\w+):(\w+\.?\d*)(?:-(\w+\.?\d*))?', region)
+            if not m:
+                return None, None, None
+            chrom = m.group(1)
+            start_band = m.group(2)
+            end_band = m.group(3) if m.group(3) else m.group(2)
+            return chrom, start_band, end_band
+
+        # Sort and merge adjacent regions with same cell, CNA, and contiguous bands (using cytoband order)
+        def merge_regions(df):
+            merged = []
+            for (cell, cna), group in df.groupby(['cell', 'CNA']):
+                parsed = group['region'].apply(parse_band)
+                group = group.assign(
+                    chrom=parsed.apply(lambda x: x[0]),
+                    start_band=parsed.apply(lambda x: x[1]),
+                    end_band=parsed.apply(lambda x: x[2])
+                )
+                group = group.sort_values(['chrom', 'start_band'], key=lambda x: x.map(lambda b: cytoband_order.get(group['chrom'].iloc[0], []).index(b) if b in cytoband_order.get(group['chrom'].iloc[0], []) else -1))
+                prev = None
+                for idx, row in group.iterrows():
+                    if prev is None:
+                        prev = row.copy()
+                    else:
+                        # Check adjacency in cytoband order
+                        chrom = row['chrom']
+                        band_list = cytoband_order.get(chrom, [])
+                        try:
+                            prev_end_idx = band_list.index(prev['end_band'])
+                            curr_start_idx = band_list.index(row['start_band'])
+                        except ValueError:
+                            merged.append(prev)
+                            prev = row.copy()
+                            continue
+                        if (chrom == prev['chrom'] and curr_start_idx == prev_end_idx + 1):
+                            prev['end_band'] = row['end_band']
+                            prev['Score'] = (prev['Score'] + row['Score']) / 2
+                            prev['pvalue'] = min(prev['pvalue'], row['pvalue'])
+                            prev['adjustp'] = min(prev['adjustp'], row['adjustp'])
+                            prev['subtreesize'] = max(prev['subtreesize'], row['subtreesize'])
+                        else:
+                            merged.append(prev)
+                            prev = row.copy()
+                if prev is not None:
+                    merged.append(prev)
+            out = []
+            for row in merged:
+                region = f"{row['chrom']}:{row['start_band']}" if row['start_band'] == row['end_band'] else f"{row['chrom']}:{row['start_band']}-{row['end_band']}"
+                out.append({
+                    'region': region,
+                    'Score': row['Score'],
+                    'pvalue': row['pvalue'],
+                    'adjustp': row['adjustp'],
+                    'cell': row['cell'],
+                    'depth': row['depth'],
+                    'subtreesize': row['subtreesize'],
+                    'CNA': row['CNA']
+                })
+            return pd.DataFrame(out)
+
+        merged_out = merge_regions(sig_lsa_df)
+        # Build realcell_df (cell, depth, subtreesize)
+        realcell_df = pd.DataFrame({
+            'cell': list(depths.keys()),
+            'depth': [depths[c] for c in depths]
+        })
+        realcell_df['subtreesize'] = realcell_df['cell'].map(
+            lambda n: len(get_subtree(real_tree, n))
+>>>>>>> main
         )
         lsa_df['pvalue'] = pvals
     else:
