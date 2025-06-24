@@ -1,0 +1,12 @@
+name: medalt-py312
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pandas
+  - numpy
+  - networkx>=3.4
+  - statsmodels
+  - pip
+  - pip:
+      - tqdm 
