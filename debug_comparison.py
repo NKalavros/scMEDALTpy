@@ -131,6 +131,53 @@ def compare_lsa_results(r_lsa_path, py_lsa_path):
     print("\nTop 5 Python results:")
     print(py_lsa[['region', 'cell', 'Score', 'pvalue', 'CNA']].head())
     
+    # Calculate consistency metrics
+    print("\n=== Consistency Analysis ===")
+    
+    # Find matching cell-region pairs (since region names might differ)
+    r_cell_regions = set(zip(r_lsa['cell'], r_lsa['region']))
+    py_cell_regions = set(zip(py_lsa['cell'], py_lsa['region']))
+    
+    # Also check by cell only (more lenient)
+    common_cells_with_cnas = set(r_cells) & set(py_cells)
+    
+    if common_cells_with_cnas:
+        consistency_pct = (len(common_cells_with_cnas) / len(set(r_cells) | set(py_cells))) * 100
+        print(f"Cell-level consistency: {consistency_pct:.1f}%")
+        print(f"Cells with CNAs in both: {sorted(common_cells_with_cnas)}")
+    
+    # Check for matching chromosomes/CNA types in common cells
+    if common_cells_with_cnas:
+        chr_matches = 0
+        cna_type_matches = 0
+        
+        for cell in common_cells_with_cnas:
+            r_cell_data = r_lsa[r_lsa['cell'] == cell]
+            py_cell_data = py_lsa[py_lsa['cell'] == cell]
+            
+            # Extract chromosomes (simplified)
+            r_chrs = set([region.split(':')[0] if ':' in region else region.split('_')[0] 
+                         for region in r_cell_data['region']])
+            py_chrs = set([region.split(':')[0] if ':' in region else region.split('_')[0] 
+                          for region in py_cell_data['region']])
+            
+            if r_chrs & py_chrs:  # Any common chromosomes
+                chr_matches += 1
+                
+            # Check CNA types
+            r_cna_types = set(r_cell_data['CNA'])
+            py_cna_types = set(py_cell_data['CNA'])
+            
+            if r_cna_types & py_cna_types:  # Any common CNA types
+                cna_type_matches += 1
+        
+        if common_cells_with_cnas:
+            chr_consistency = (chr_matches / len(common_cells_with_cnas)) * 100
+            cna_consistency = (cna_type_matches / len(common_cells_with_cnas)) * 100
+            
+            print(f"Chromosome-level consistency: {chr_consistency:.1f}%")
+            print(f"CNA type consistency: {cna_consistency:.1f}%")
+    
     return r_lsa, py_lsa
 
 def check_permutations(perm_dir, n_expected=500):
@@ -158,6 +205,52 @@ def check_permutations(perm_dir, n_expected=500):
             print(f"Value range: [{perm_cnv.min().min()}, {perm_cnv.max().max()}]")
     
     return len(cnv_files) >= n_expected
+
+def check_visualizations(r_dir, py_dir):
+    """Check visualization files in both directories."""
+    
+    # Expected visualization files
+    r_viz_files = [
+        'singlecell.tree.pdf',  # R naming convention
+        'LSA.tree.pdf'          # R naming convention
+    ]
+    
+    py_viz_files = [
+        'singlecell_tree.pdf',           # Python naming convention
+        'LSA_tree.pdf',                  # Python naming convention
+        'MEDALT_visualization_report.pdf' # Python comprehensive report
+    ]
+    
+    print("R visualization files:")
+    for viz_file in r_viz_files:
+        path = os.path.join(r_dir, viz_file)
+        exists = os.path.exists(path)
+        print(f"  {viz_file}: {'✓' if exists else '✗'}")
+        if exists:
+            size = os.path.getsize(path)
+            print(f"    Size: {size:,} bytes")
+    
+    print("\nPython visualization files:")
+    for viz_file in py_viz_files:
+        path = os.path.join(py_dir, viz_file)
+        exists = os.path.exists(path)
+        print(f"  {viz_file}: {'✓' if exists else '✗'}")
+        if exists:
+            size = os.path.getsize(path)
+            print(f"    Size: {size:,} bytes")
+    
+    # Check for any additional PDF files
+    try:
+        r_pdfs = [f for f in os.listdir(r_dir) if f.endswith('.pdf')]
+        py_pdfs = [f for f in os.listdir(py_dir) if f.endswith('.pdf')]
+        
+        if r_pdfs:
+            print(f"\nAll R PDF files: {r_pdfs}")
+        if py_pdfs:
+            print(f"All Python PDF files: {py_pdfs}")
+            
+    except OSError:
+        print("Could not list directory contents for PDF check")
 
 def main():
     """Main comparison function."""
@@ -205,12 +298,24 @@ def main():
     py_perm_dir = os.path.join(py_dir, 'permutation')
     check_permutations(py_perm_dir)
     
+    # Check visualizations
+    print("\n=== Visualization Files Check ===")
+    check_visualizations(r_dir, py_dir)
+    
     print("\n=== Summary ===")
-    print("Key differences identified:")
-    print("1. Tree structure differences (different edges and weights)")
-    print("2. Different binning/region naming strategies")
-    print("3. LSA results show different cells and p-value distributions")
-    print("4. Check if permutations were generated correctly")
+    print("Comparison complete! Key areas analyzed:")
+    print("1. Tree structure (edges, weights, topology)")
+    print("2. Binning strategy and CNV profiles")
+    print("3. LSA results consistency (cells, chromosomes, CNA types)")
+    print("4. Permutation file generation")
+    print("5. Visualization file availability")
+    print("\nFor detailed biological validation, compare:")
+    print("- Common cells with significant CNAs")
+    print("- Chromosome-level patterns (AMP/DEL)")
+    print("- Tree topology and phylogenetic relationships")
+    print("- Generated visualization files")
+    print("\nThe Python implementation now includes comprehensive visualizations!")
+    print("Check the generated PDF files for graphical results comparison.")
 
 if __name__ == '__main__':
     main()

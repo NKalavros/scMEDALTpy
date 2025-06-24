@@ -16,6 +16,51 @@ class MEDALTVisualizer:
     
     def __init__(self, output_path: str = "."):
         self.output_path = output_path
+    
+    def _create_tree_layout(self, G, root):
+        """
+        Create a hierarchical tree layout manually
+        """
+        pos = {}
+        
+        # BFS to assign levels
+        levels = {root: 0}
+        queue = [root]
+        
+        while queue:
+            node = queue.pop(0)
+            current_level = levels[node]
+            
+            # Get children (successors in directed graph)
+            children = list(G.successors(node))
+            for child in children:
+                if child not in levels:
+                    levels[child] = current_level + 1
+                    queue.append(child)
+        
+        # Group nodes by level
+        level_groups = {}
+        for node, level in levels.items():
+            if level not in level_groups:
+                level_groups[level] = []
+            level_groups[level].append(node)
+        
+        # Assign positions
+        max_level = max(levels.values()) if levels else 0
+        
+        for level, nodes_at_level in level_groups.items():
+            y = max_level - level  # Root at top
+            num_nodes = len(nodes_at_level)
+            
+            if num_nodes == 1:
+                x_positions = [0]
+            else:
+                x_positions = np.linspace(-num_nodes/2, num_nodes/2, num_nodes)
+            
+            for i, node in enumerate(nodes_at_level):
+                pos[node] = (x_positions[i], y)
+        
+        return pos
         
     def plot_single_cell_tree(self, tree_file: str, output_filename: str = "singlecell_tree.pdf"):
         """
@@ -38,8 +83,19 @@ class MEDALTVisualizer:
                                    target=celltree.columns[1], create_using=nx.DiGraph())
         
         # Plot
-        plt.figure(figsize=(10, 10))
-        pos = nx.spring_layout(G, k=1, iterations=50)
+        plt.figure(figsize=(15, 10))
+        
+        # Use hierarchical tree layout
+        try:
+            # Try graphviz hierarchical layout first
+            pos = nx.nx_agraph.graphviz_layout(G, prog='dot')
+        except:
+            try:
+                # Fallback to manual hierarchical layout
+                pos = self._create_tree_layout(G, 'root' if 'root' in G.nodes() else list(G.nodes())[0])
+            except:
+                # Final fallback to spring layout but with better parameters
+                pos = nx.spring_layout(G, k=3, iterations=100)
         
         # Draw nodes
         node_colors = [nodes[nodes['id'] == node]['color'].iloc[0] for node in G.nodes()]
@@ -49,7 +105,25 @@ class MEDALTVisualizer:
         nx.draw_networkx_edges(G, pos, edge_color='gray', arrows=True, 
                               arrowsize=10, arrowstyle='->', alpha=0.6)
         
-        plt.title("Single Cell Tree")
+        # Add labels for important nodes (root and nodes with many connections)
+        important_nodes = {}
+        degree_centrality = nx.degree_centrality(G)
+        sorted_nodes = sorted(degree_centrality.items(), key=lambda x: x[1], reverse=True)
+        
+        # Label root and top connected nodes
+        for node, centrality in sorted_nodes[:min(10, len(sorted_nodes))]:
+            if node == 'root' or centrality > 0.1:
+                # Shorten cell names for display
+                if len(str(node)) > 15:
+                    label = str(node)[:12] + '...'
+                else:
+                    label = str(node)
+                important_nodes[node] = label
+        
+        if important_nodes:
+            nx.draw_networkx_labels(G, pos, important_nodes, font_size=6, font_weight='bold')
+        
+        plt.title("Single Cell Phylogenetic Tree")
         plt.axis('off')
         
         # Save to PDF
@@ -63,6 +137,7 @@ class MEDALTVisualizer:
     def plot_lsa_tree(self, lsa_file: str, tree_file: str, output_filename: str = "LSA_tree.pdf"):
         """
         Plot LSA Tree with genomic annotations (equivalent to R lines 287-319)
+        Only shows cells with significant CNAs and their connections
         """
         # Read LSA results
         try:
@@ -136,9 +211,15 @@ class MEDALTVisualizer:
         
         # Use hierarchical layout
         try:
+            # Try graphviz hierarchical layout first
             pos = nx.nx_agraph.graphviz_layout(G, prog='dot')
         except:
-            pos = nx.spring_layout(G, k=2, iterations=50)
+            try:
+                # Fallback to manual hierarchical layout
+                pos = self._create_tree_layout(G, 'root' if 'root' in G.nodes() else list(G.nodes())[0])
+            except:
+                # Final fallback to spring layout but with better parameters
+                pos = nx.spring_layout(G, k=3, iterations=100)
         
         # Draw nodes
         node_colors = [nodes[nodes['id'] == node]['color'].iloc[0] for node in G.nodes()]
@@ -151,9 +232,19 @@ class MEDALTVisualizer:
         nx.draw_networkx_edges(G, pos, edge_color='gray', arrows=True, 
                               arrowsize=15, arrowstyle='->', alpha=0.6, width=edge_weights)
         
-        # Add labels
-        labels = {node: annotations.get(node, '') for node in G.nodes()}
-        nx.draw_networkx_labels(G, pos, labels, font_size=8, font_weight='bold')
+        # Add labels - only for nodes with annotations or root
+        labels = {}
+        for node in G.nodes():
+            if node == 'root':
+                labels[node] = 'ROOT'
+            elif annotations.get(node, ''):
+                # Show cell name (shortened) and top CNA
+                cell_short = str(node)[:10] + '...' if len(str(node)) > 13 else str(node)
+                top_cna = annotations[node].split(';')[0]  # Just the first CNA
+                labels[node] = f"{cell_short}\n{top_cna}"
+        
+        if labels:
+            nx.draw_networkx_labels(G, pos, labels, font_size=6, font_weight='bold')
         
         plt.title("LSA Tree with Genomic Annotations")
         plt.axis('off')

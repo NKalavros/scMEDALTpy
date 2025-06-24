@@ -67,6 +67,13 @@ def bin_rna_cnv(inputfile: str, reference: str, delt: int, outputfile: str, band
     """
     Exactly replicates the RNAinput function from dataTransfer.R in Python.
     """
+    # Load cytoband information if available
+    bands = None
+    if band_file and os.path.exists(band_file):
+        bands = load_cytobands(band_file)
+        if debug:
+            print(f"DEBUG: Loaded cytobands from {band_file}")
+    
     # Step 1: data=read.csv(inputfile,sep="\t")
     data = pd.read_csv(inputfile, sep="\t", index_col=0)
     
@@ -180,26 +187,55 @@ def bin_rna_cnv(inputfile: str, reference: str, delt: int, outputfile: str, band
                 bin_mean = sub1.mean(axis=0)
                 subseg.append(bin_mean.values)
                 
-                # chrregion=c(chrregion,paste(i,"_",j,sep=""))
-                chrregion.append(f"{i}_{j}")
+                # Get region name (cytoband or simple)
+                if bands:
+                    bin_start = subdata.iloc[start_idx, 1]  # Start position
+                    bin_end = subdata.iloc[min(end_idx-1, len(subdata)-1), 2]  # End position
+                    region_name = get_band_name(bands, f"chr{i}", bin_start, bin_end)
+                else:
+                    region_name = f"{i}_{j}"
+                chrregion.append(region_name)
             
             # Last bin: subseg=rbind(subseg,apply(subdata[((intekk-1)*delt+1):dim(subdata)[1],4:dim(subdata)[2]],2,mean))
             start_idx = (intekk-1) * delt
             sub1 = subdata.iloc[start_idx:, 3:]
             bin_mean = sub1.mean(axis=0)
             subseg.append(bin_mean.values)
-            chrregion.append(f"{i}_{intekk}")
+            
+            # Get region name for last bin
+            if bands:
+                bin_start = subdata.iloc[start_idx, 1]  # Start position
+                bin_end = subdata.iloc[-1, 2]  # End position (last gene)
+                region_name = get_band_name(bands, f"chr{i}", bin_start, bin_end)
+            else:
+                region_name = f"{i}_{intekk}"
+            chrregion.append(region_name)
         else:
             # subseg=apply(subdata[,4:dim(subdata)[2]],2,mean)
             bin_mean = subdata.iloc[:, 3:].mean(axis=0)
             subseg.append(bin_mean.values)
-            chrregion.append(f"{i}_1")
+            
+            # Get region name for single bin
+            if bands:
+                bin_start = subdata.iloc[0, 1]  # Start position (first gene)
+                bin_end = subdata.iloc[-1, 2]  # End position (last gene)
+                region_name = get_band_name(bands, f"chr{i}", bin_start, bin_end)
+            else:
+                region_name = f"{i}_1"
+            chrregion.append(region_name)
         
         # segdata=rbind(segdata,subseg)
         segdata.extend(subseg)
     
     # Step 14: row.names(segdata)=paste("chr",chrregion,sep="")
-    chrregion_final = [f"chr{region}" for region in chrregion]
+    # If using cytobands, chrregion already contains full names like "chr7:q22.3"
+    # If using simple naming, chrregion contains "7_1" so we add "chr" prefix
+    chrregion_final = []
+    for region in chrregion:
+        if ':' in region:  # Already contains chr prefix from cytoband
+            chrregion_final.append(region)
+        else:  # Simple naming, add chr prefix
+            chrregion_final.append(f"chr{region}")
     
     # Step 15: segdata=t(round(segdata))
     if len(segdata) > 0:
@@ -305,8 +341,8 @@ def main():
 
     # Binning for RNA data
     print(f"Converting to segmental CN level (bin size={GENE_BIN_SZ})...")
-    # Use exact R binning algorithm (numeric regions, no cytoband mapping)
-    bin_rna_cnv(DE_DUP_PATH, GENPOS_PATH, int(GENE_BIN_SZ), SEGCNV_PATH, band_file=None, debug=debug)
+    # Use exact R binning algorithm (with cytoband mapping)
+    bin_rna_cnv(DE_DUP_PATH, GENPOS_PATH, int(GENE_BIN_SZ), SEGCNV_PATH, band_file=band_file, debug=debug)
 
     # Tree inference
     print("\nInferring MEDALT tree...")
@@ -358,7 +394,7 @@ def main():
                 bin_size=int(GENE_BIN_SZ),
                 outdir=PERMUT_PATH,
                 prefix="permute",
-                band_file=None,  # Use exact R binning (no cytoband mapping)
+                band_file=band_file,  # Use exact R binning (with cytoband mapping)
                 seed=args.seed,
                 debug=debug
             )
@@ -472,7 +508,7 @@ def main():
         visualizer = MEDALTVisualizer(OUTPUT_PATH)
         
         # Plot single cell tree
-        tree_file = os.path.join(OUTPUT_PATH, 'CNV.tree.txt')
+        tree_file = os.path.join(OUTPUT_PATH, '3_CNV.tree.txt')
         if os.path.exists(tree_file):
             visualizer.plot_single_cell_tree(tree_file)
         

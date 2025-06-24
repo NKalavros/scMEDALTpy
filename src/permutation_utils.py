@@ -110,7 +110,9 @@ def permute_gene_cnv(cnv_df: pd.DataFrame, reference_df: pd.DataFrame,
                 if bands:
                     region = get_band_name(bands, chrom, bin_start, bin_end)
                 else:
-                    region = f"chr{chrom}:bin{j+1}"
+                    # Extract numeric part from chromosome (chr7 -> 7)
+                    chrom_num = chrom.replace('chr', '') if chrom.startswith('chr') else chrom
+                    region = f"{chrom_num}_{j+1}"
                 
                 chrregion.append(region)
         

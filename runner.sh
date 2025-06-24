@@ -37,10 +37,40 @@ echo "=========================================="
 echo "Pipeline complete!"
 echo "=========================================="
 echo ""
-echo "To compare with R output, run:"
-echo "python debug_comparison.py example/outputRNA example/outputRNA_fixed"
-echo ""
-echo "Key files generated:"
-echo "- Tree: ${OUTPUT_DIR}/3_CNV.tree.txt"
-echo "- LSA results: ${OUTPUT_DIR}/segmental.LSA.txt"
-echo "- Permutations: ${OUTPUT_DIR}/permutation/"
+
+# Check if analysis was successful before creating additional visualizations
+if [ -f "${OUTPUT_DIR}/3_CNV.tree.txt" ]; then
+    echo "Creating additional visualizations..."
+    echo ""
+    
+    # Create visualizations using the standalone script
+    python visualize_medalt.py "${OUTPUT_DIR}/3_CNV.tree.txt" \
+        --lsa-file "${OUTPUT_DIR}/segmental.LSA.txt" \
+        --output-path "${OUTPUT_DIR}"
+    
+    echo ""
+    echo "=========================================="
+    echo "All visualizations complete!"
+    echo "=========================================="
+    echo ""
+    
+    echo "Generated files:"
+    echo "Data files:"
+    echo "- Binned CNV data: ${OUTPUT_DIR}/2_scRNA.CNV_bin_30.csv"
+    echo "- Tree structure: ${OUTPUT_DIR}/3_CNV.tree.txt"
+    echo "- LSA results: ${OUTPUT_DIR}/segmental.LSA.txt"
+    echo "- Permutations: ${OUTPUT_DIR}/permutation/"
+    echo ""
+    echo "Visualization files:"
+    echo "- Single cell tree: ${OUTPUT_DIR}/singlecell_tree.pdf"
+    echo "- LSA tree: ${OUTPUT_DIR}/LSA_tree.pdf"
+    echo "- Comprehensive report: ${OUTPUT_DIR}/MEDALT_visualization_report.pdf"
+    echo ""
+    echo "To compare with R output, run:"
+    echo "python debug_comparison.py example/outputRNA example/outputRNA_fixed"
+    
+else
+    echo "ERROR: Analysis failed - tree file not generated"
+    echo "Check the output above for error messages"
+    exit 1
+fi
