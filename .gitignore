@@ -1,7 +1,5 @@
 MEDALT/example/outputRNA_pytest/permutation
 example/outputRNA_pytest/permutation
-<<<<<<< HEAD
 example/outputRNA_fixed/permutation
-=======
-__pycahce__
->>>>>>> main
+__pycache__
+example/outputRNA_r_exact/permutation/

@@ -23,8 +23,8 @@ def read_cnv(in_seg_path):
     chr_data = {}
     
     for col in df.columns:
-        # Extract chromosome from column name
-        chr_match = col.split(':')[0]
+        # Extract chromosome from column name (chr7_1 -> chr7)
+        chr_match = col.split('_')[0]
         if chr_match in chr_scan:
             if chr_match not in chr_data:
                 chr_data[chr_match] = []

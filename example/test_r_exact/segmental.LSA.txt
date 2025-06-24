@@ -1,0 +1,4 @@
+region	Score	cell	depth	subtreesize	CNA	pvalue	adjustp	significant
+chr12_1	-0.96	HNSCC5_p7_HNSCC5_P7_D10	1	50	DEL	0.01	0.042	True
+chr8_1	0.6666666666666665	HNSCC5_p9_HNSCC5_P9_G07	3	6	AMP	0.01	0.042	True
+chr8_2	1.54	HNSCC5_p7_HNSCC5_P7_D10	1	50	AMP	0.01	0.042	True
