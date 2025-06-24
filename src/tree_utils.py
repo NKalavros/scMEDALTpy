@@ -133,30 +133,55 @@ def create_tree(nodes, node_list, root, proximity=True, len_threshold=30, df_cor
 
     return G
 
-def compute_rdmst(G, root):
-    """Return a minimum spanning arborescence oriented away from the given root.
+def compute_rdmst(g, root):
+    """Deterministic Chu-Liu/Edmonds implementation (legacy MEDALT).
 
-    This wraps NetworkX's minimum_spanning_arborescence but first guarantees that
-    the provided `root` is the (unique) root of the arborescence by removing any
-    incoming edges to `root`.  As a result, the returned DiGraph already has
-    edges oriented outwards from `root`, so we no longer need the extra BFS
-    re-orientation step used previously.
+    Parameters
+    ----------
+    g : dict of dict
+        Directed graph encoded as {u: {v: weight}}
+    root : str
+        Node ID to be used as the single zero-indegree root.
+
+    Returns
+    -------
+    tuple
+        (tree_dict, total_weight) where `tree_dict` is a dict-of-dicts in the
+        same format as `g`, containing only the edges in the minimum spanning
+        arborescence oriented away from `root`.
     """
-    # Work on a copy so we don't mutate callers' graph.
-    G2 = G.copy()
+    # Helper functions cloned (with minor tweaks) from the original
+    # SP1_SCT_UTIL implementation so that the algorithm & tie-breaking behaviour
+    # exactly matches the historical MEDALT code.
 
-    # Remove all edges that point **into** the designated root so that the root
-    # is forced to have in-degree 0 in the arborescence.
-    in_edges_to_root = list(G2.in_edges(root, data=True))
-    G2.remove_edges_from([(u, v) for u, v, *_ in in_edges_to_root])
+    def rdmst_recursor(g_input, root_node):
+        """Recursive Chu-Liu/Edmonds with cycle contraction."""
+        g_reversed = reverse__graph(g_input)            # reverse directions
+        g_rev_cont = contract_graph(g_reversed, root_node)  # subtract minimum incoming edge weight per node
+        g_rdst_min = get_rdst_graph(g_rev_cont, root_node)  # keep only zero-weight in-edges
+        loop_in_gr = find_graphloop(g_rdst_min)             # detect cycles
 
-    # Compute the minimum spanning arborescence.
-    mst = nx.minimum_spanning_arborescence(G2)
+        if not loop_in_gr:
+            # No cycles: reverse back and return
+            return reverse__graph(g_rdst_min)
+        else:
+            g_contract = reverse__graph(g_rev_cont)
+            g_pruned, loop_nodes = prune____graph(g_contract, loop_in_gr)
+            g_new_rdst = rdmst_recursor(g_pruned, root_node)  # recurse on contracted graph
+            g_expanded = expand___graph(g_contract, g_new_rdst, loop_in_gr, loop_nodes)
+            return g_expanded
 
-    # Convert to nested-dict representation expected by downstream code.
-    tree_dict = {u: {v: d["weight"] for v, d in mst[u].items()} for u in mst.nodes()}
+    # Kick off recursion
+    tree_dict = rdmst_recursor(g, root)
 
-    return tree_dict, mst
+    # Compute total weight (and also re-insert the original weights) for convenience
+    total_weight = 0
+    for u in list(tree_dict):
+        for v in list(tree_dict[u]):
+            tree_dict[u][v] = g[u][v]
+            total_weight += tree_dict[u][v]
+
+    return tree_dict, total_weight
 
 def graph_rank_dist(g, startnode):
     dist = {}
