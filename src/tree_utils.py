@@ -200,13 +200,14 @@ def compute_rdmst(G, root, debug=False):
     if root not in G2:
         G2.add_node(root)
     
-    # Nodes that can be reached from root via outgoing edges
-    reachable = nx.descendants(G2, root) | {root}
+    # Add edges from root to unreachable nodes with high weight
+    reachable = nx.ancestors(G2, root) | {root}
+    unreachable = set(G2.nodes()) - reachable
     
-    if debug and (set(G2.nodes()) - reachable):
-        print(f"DEBUG: {len(set(G2.nodes()) - reachable)} nodes unreachable from root, adding high-weight edges")
+    if debug and unreachable:
+        print(f"DEBUG: {len(unreachable)} nodes unreachable from root, adding high-weight edges")
     
-    for node in (set(G2.nodes()) - reachable):
+    for node in unreachable:
         if node != root:
             # Add high-weight edge from root
             G2.add_edge(root, node, weight=1000000)
