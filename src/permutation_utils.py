@@ -64,12 +64,15 @@ def permute_gene_cnv(cnv_df: pd.DataFrame, reference_df: pd.DataFrame,
         print(f"DEBUG: Total genes: {len(cnv_df)}")
     
     # Function to bin permuted CNV
-    def bin_cnv(permuted_cnv, reference, bin_size, bands=None):
+    def bin_cnv(permuted_cnv, reference, bin_size, bands=None, debug=False):
         # Match genes between permuted CNV and reference
         gene_info = reference.set_index("gene")
         valid_genes = permuted_cnv.index.intersection(gene_info.index)
         gene_info = gene_info.loc[valid_genes].reset_index()
         permuted_cnv = permuted_cnv.loc[valid_genes]
+        
+        # Rename index column back to gene after reset_index
+        gene_info.rename(columns={'index': 'gene'}, inplace=True)
         
         # Remove sex chromosomes
         gene_info = gene_info[~gene_info["chr"].isin(["M", "Y"])]
@@ -144,7 +147,7 @@ def permute_gene_cnv(cnv_df: pd.DataFrame, reference_df: pd.DataFrame,
         permuted_cnv.to_csv(gene_cnv_path, sep="\t", header=True, index=True, quoting=3)
         
         # Bin the permuted CNV
-        binned_cnv = bin_cnv(permuted_cnv, reference_df, bin_size, bands)
+        binned_cnv = bin_cnv(permuted_cnv, reference_df, bin_size, bands, debug)
         
         # Write binned CNV
         binned_cnv_path = os.path.join(outdir, f"{prefix}.{perm_idx}.CNV.txt")

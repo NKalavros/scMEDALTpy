@@ -11,6 +11,7 @@ from src.lsa_utils import (
     get_subtree, lineage_cfl_per_region, lineage_score, get_depths, get_children_count,
     empirical_pvals_per_region, fdr_correction, collect_significant_cnas, refine_cna
 )
+from src.visualization import MEDALTVisualizer
 from collections import defaultdict
 import re
 
@@ -64,58 +65,164 @@ def get_band_name(bands, chrom, start, end):
 
 def bin_rna_cnv(inputfile: str, reference: str, delt: int, outputfile: str, band_file: str = None, debug=False):
     """
-    Replicates the RNAinput function from dataTransfer.R in Python.
+    Exactly replicates the RNAinput function from dataTransfer.R in Python.
     """
+    # Step 1: data=read.csv(inputfile,sep="\t")
     data = pd.read_csv(inputfile, sep="\t", index_col=0)
+    
+    # Step 2: data=round(data*2)
     data = np.round(data * 2)
+    
+    # Step 3: geneInfo=read.csv(reference,sep="\t",header=F)
     gene_info = pd.read_csv(reference, sep="\t", header=None)
-    gene_info.columns = ["gene", "chr", "start", "end"]
     
-    # Match genes
-    idx = data.index.to_series().map(lambda g: gene_info["gene"].tolist().index(g) if g in gene_info["gene"].tolist() else np.nan)
-    valid = ~idx.isna()
-    matched_gene_info = gene_info.iloc[idx[valid].astype(int)]
-    matched_data = data.loc[valid]
+    # Step 4: index=match(row.names(data),as.character(geneInfo[,1]))
+    gene_names = data.index.tolist()
+    gene_list = gene_info.iloc[:, 0].astype(str).tolist()
     
-    newdata = pd.concat([matched_gene_info.reset_index(drop=True), matched_data.reset_index(drop=True)], axis=1)
-    newdata = newdata[~newdata["chr"].isin(["M", "Y"])]
+    # Create mapping like R's match function
+    index_map = []
+    for gene in gene_names:
+        try:
+            idx = gene_list.index(gene)
+            index_map.append(idx)
+        except ValueError:
+            index_map.append(None)
     
-    chroms = sorted(set(newdata["chr"]) - set(["M", "Y"]), key=lambda x: (len(x), x))
-    segdata = []
-    chrregion = []
-    bands = load_cytobands(band_file) if band_file else None
+    # Step 5: newdata=cbind(geneInfo[index[!is.na(index)],2:4],data[!is.na(index),])
+    valid_indices = [i for i, idx in enumerate(index_map) if idx is not None]
+    valid_gene_indices = [index_map[i] for i in valid_indices]
     
-    for chrom in chroms:
-        subdata = newdata[newdata["chr"] == chrom].sort_values("start")
-        n_genes = subdata.shape[0]
-        n_bins = max(1, int(np.round(n_genes / delt)))
-        starts = subdata["start"].values
-        ends = subdata["end"].values
-        
-        for j in range(n_bins):
-            start_idx = j * delt
-            end_idx = min((j + 1) * delt, n_genes)
-            bin_data = subdata.iloc[start_idx:end_idx, 4:]
-            bin_mean = bin_data.mean(axis=0)
-            segdata.append(bin_mean.values)
-            bin_start = starts[start_idx]
-            bin_end = ends[end_idx-1]
-            
-            if bands:
-                region = get_band_name(bands, chrom, bin_start, bin_end)
-            else:
-                region = f"chr{chrom}_{j+1}"
-            chrregion.append(region)
+    matched_gene_info = gene_info.iloc[valid_gene_indices, 1:4].reset_index(drop=True)  # columns 2:4 in R (1:4 in Python)
+    matched_data = data.iloc[valid_indices].reset_index(drop=True)
     
-    segdata = np.vstack(segdata)
-    segdata = np.round(segdata)
-    segdata = pd.DataFrame(segdata, columns=matched_data.columns, index=chrregion)
-    segdata = segdata.T
+    # Combine like cbind
+    newdata = pd.concat([matched_gene_info, matched_data], axis=1)
+    
+    # Step 6-7: Extract chromosome numbers exactly like R
+    # ll=nchar(as.character(newdata[,1]))
+    # chro=apply(chromo,1,function(x){return(substr(x[1],start=4,stop=x[2]))})
+    chr_strings = newdata.iloc[:, 0].astype(str)
+    chro = []
+    for chr_str in chr_strings:
+        # R's substr starts at position 4 (1-indexed), which is position 3 in Python (0-indexed)
+        extracted = chr_str[3:len(chr_str)] if len(chr_str) >= 4 else chr_str
+        chro.append(extracted)
     
     if debug:
-        print(f"DEBUG: Binned {data.shape[0]} genes into {segdata.shape[1]} segments")
-        print(f"DEBUG: First 5 segments: {list(segdata.columns[:5])}")
+        print(f"DEBUG: Sample chromosome strings: {chr_strings[:5].tolist()}")
+        print(f"DEBUG: Extracted chromosomes: {chro[:5]}")
     
+    # Step 8: chro[chro=="X"]=23
+    chro = [23 if c == "X" else c for c in chro]
+    
+    # Step 9: newdata[,1]=chro
+    newdata.iloc[:, 0] = chro
+    
+    if debug:
+        print(f"DEBUG: After processing - unique chromosomes: {list(set(chro))}")
+    
+    # Step 10: newdata=newdata[newdata[,1]!="M"&newdata[,1]!="Y",]
+    newdata = newdata[(newdata.iloc[:, 0] != "M") & (newdata.iloc[:, 0] != "Y")]
+    
+    # Step 11-12: chrom=c(1:23); chrom=intersect(chrom,chro)
+    all_chroms = list(range(1, 24))  # 1:23 in R
+    present_chroms = list(set(newdata.iloc[:, 0].tolist()))
+    # Convert to numeric where possible
+    numeric_present = []
+    for c in present_chroms:
+        try:
+            numeric_present.append(int(c))
+        except (ValueError, TypeError):
+            pass
+    chrom = sorted(set(all_chroms).intersection(set(numeric_present)))
+    
+    if debug:
+        print(f"DEBUG: Present chromosomes in data: {present_chroms}")
+        print(f"DEBUG: Numeric present: {numeric_present}")
+        print(f"DEBUG: Final chrom list: {chrom}")
+    
+    segdata = []
+    chrregion = []
+    
+    # Step 13+: Main binning loop
+    for i in chrom:
+        # subseg=c()
+        subseg = []
+        
+        # subdata=newdata[newdata[,1]==i,]
+        subdata = newdata[newdata.iloc[:, 0] == str(i)].copy()
+        
+        if debug:
+            print(f"DEBUG: Chromosome {i} (type {type(i)}) has {len(subdata)} genes")
+            print(f"DEBUG: Unique values in column 0: {newdata.iloc[:, 0].unique()[:10]}")
+            print(f"DEBUG: Types in column 0: {[type(x) for x in newdata.iloc[:, 0].unique()[:3]]}")
+        
+        # subdata=subdata[order(as.numeric(as.character(subdata[,2]))),]
+        subdata = subdata.sort_values(subdata.columns[1])  # Sort by start position
+        
+        # kk=dim(subdata)[1]/delt; intekk=round(kk)
+        kk = len(subdata) / delt
+        intekk = round(kk)
+        
+        if debug:
+            print(f"DEBUG: Chromosome {i}: kk={kk}, intekk={intekk}")
+        
+        if intekk > 1:
+            # for (j in 1:(intekk-1))
+            for j in range(1, intekk):  # R: 1 to (intekk-1), Python: 0 to (intekk-2), but we want 1 to (intekk-1)
+                # sub1=subdata[((j-1)*delt+1):(j*delt),4:dim(subdata)[2]]
+                start_idx = (j-1) * delt  # R is 1-indexed
+                end_idx = j * delt
+                sub1 = subdata.iloc[start_idx:end_idx, 3:]  # R columns 4+ = Python columns 3+
+                
+                # subseg=rbind(subseg,apply(sub1,2,mean))
+                bin_mean = sub1.mean(axis=0)
+                subseg.append(bin_mean.values)
+                
+                # chrregion=c(chrregion,paste(i,"_",j,sep=""))
+                chrregion.append(f"{i}_{j}")
+            
+            # Last bin: subseg=rbind(subseg,apply(subdata[((intekk-1)*delt+1):dim(subdata)[1],4:dim(subdata)[2]],2,mean))
+            start_idx = (intekk-1) * delt
+            sub1 = subdata.iloc[start_idx:, 3:]
+            bin_mean = sub1.mean(axis=0)
+            subseg.append(bin_mean.values)
+            chrregion.append(f"{i}_{intekk}")
+        else:
+            # subseg=apply(subdata[,4:dim(subdata)[2]],2,mean)
+            bin_mean = subdata.iloc[:, 3:].mean(axis=0)
+            subseg.append(bin_mean.values)
+            chrregion.append(f"{i}_1")
+        
+        # segdata=rbind(segdata,subseg)
+        segdata.extend(subseg)
+    
+    # Step 14: row.names(segdata)=paste("chr",chrregion,sep="")
+    chrregion_final = [f"chr{region}" for region in chrregion]
+    
+    # Step 15: segdata=t(round(segdata))
+    if len(segdata) > 0:
+        segdata = np.array(segdata)
+        segdata = np.round(segdata)
+        # Replace any NaN with 2 (diploid default)
+        segdata = np.nan_to_num(segdata, nan=2.0)
+        segdata = pd.DataFrame(segdata, columns=matched_data.columns, index=chrregion_final)
+        segdata = segdata.T  # Transpose like R
+    else:
+        # If no segments created, create empty DataFrame with proper structure
+        segdata = pd.DataFrame(index=matched_data.columns, columns=chrregion_final)
+    
+    if debug:
+        print(f"DEBUG: Binned {len(data)} genes into {segdata.shape[1]} segments")
+        print(f"DEBUG: First 5 segments: {list(segdata.columns[:5])}")
+        print(f"DEBUG: Chromosome order: {chrom}")
+        print(f"DEBUG: Total bins created: {len(chrregion)}")
+        print(f"DEBUG: Segdata shape before transpose: {len(segdata) if isinstance(segdata, list) else 'not list'}")
+        if len(segdata) > 0 and hasattr(segdata, 'shape'):
+            print(f"DEBUG: First row values: {segdata.iloc[0].values if hasattr(segdata, 'iloc') else 'no iloc'}")
+    
+    # Step 16: write.table(segdata, paste(inputfile,".CNV.txt",sep=""), ...)
     segdata.to_csv(outputfile, sep="\t", header=True, index=True, quoting=3)
 
 def main():
@@ -144,12 +251,9 @@ def main():
     rt = dt_.now(); rt = f"{rt.year}_{rt.month:0>2}{rt.day:0>2}_{rt.hour:0>2}{rt.minute:0>2}"
     OUTPUT_PATH = args.Output if args.Output else f"{IN_CNV_PATH[:-4]}_{rt}"
     permutation = args.Permutation if args.Permutation else "F"
-<<<<<<< HEAD
     debug = args.debug
-=======
     # Define the total number of permutations we will compute and later load.
     N_PERMUTATIONS = 500  # keep this consistent across generation and analysis
->>>>>>> main
 
     PCKAGE_PATH = getPath(PCKAGE_PATH).replace("//", "/")
     IN_CNV_PATH = getPath(IN_CNV_PATH).replace("//", "/")
@@ -201,7 +305,7 @@ def main():
 
     # Binning for RNA data
     print(f"Converting to segmental CN level (bin size={GENE_BIN_SZ})...")
-    # Use numeric bins like the original R implementation (no cytoband mapping)
+    # Use exact R binning algorithm (numeric regions, no cytoband mapping)
     bin_rna_cnv(DE_DUP_PATH, GENPOS_PATH, int(GENE_BIN_SZ), SEGCNV_PATH, band_file=None, debug=debug)
 
     # Tree inference
@@ -243,21 +347,18 @@ def main():
                 shutil.rmtree(PERMUT_PATH)
             os.makedirs(PERMUT_PATH, exist_ok=True)
             gene_info = pd.read_csv(GENPOS_PATH, sep="\t", header=None)
+            gene_info.columns = ["gene", "chr", "start", "end"]
             dedup_cnv = pd.read_csv(DE_DUP_PATH, sep="\t", index_col=0)
             
             # Run permutation with same seed for reproducibility
             permute_gene_cnv(
                 cnv_df=dedup_cnv,
                 reference_df=gene_info,
-<<<<<<< HEAD
-                n_permutations=500,  # Match R version
-=======
                 n_permutations=N_PERMUTATIONS,
->>>>>>> main
                 bin_size=int(GENE_BIN_SZ),
                 outdir=PERMUT_PATH,
                 prefix="permute",
-                band_file=band_file,
+                band_file=None,  # Use exact R binning (no cytoband mapping)
                 seed=args.seed,
                 debug=debug
             )
@@ -302,7 +403,6 @@ def main():
             })
     
     lsa_df = pd.DataFrame(lsa_records)
-<<<<<<< HEAD
     
     if debug:
         print(f"DEBUG: LSA records for {len(lsa_df)} node-region pairs")
@@ -314,131 +414,7 @@ def main():
         print("Computing empirical p-values from permutations...")
         pvals = empirical_pvals_per_region(
             lsa_df, real_tree, real_cnv, PERMUT_PATH, 
-            n_perms=500, root=root, debug=debug
-=======
-    # Load permutation results (binned CNVs)
-    perm_cfls = defaultdict(list)  # (node, feature) -> list of permuted CFLs
-    for j in range(1, N_PERMUTATIONS + 1):
-        perm_cnv_path = os.path.join(PERMUT_PATH, f"permute.{j}.CNV.txt")
-        if not os.path.exists(perm_cnv_path):
-            continue
-        perm_cnv = pd.read_csv(perm_cnv_path, sep="\t", index_col=0)
-        for node in real_tree:
-            if node == root:
-                continue
-            lineage = get_subtree(real_tree, node)
-            lineage = [cell for cell in lineage if cell != 'root']
-            cfl = lineage_cfl(perm_cnv, lineage)
-            for feature, score in cfl.items():
-                perm_cfls[(node, feature)].append(score)
-    # Compute empirical p-values for each (node, feature)
-    pvals = []
-    for idx, row in lsa_df.iterrows():
-        key = (row['cell'], row['region'])
-        observed = row['Score']
-        perm_scores = np.array(perm_cfls.get(key, [0]*N_PERMUTATIONS))
-        if len(perm_scores) == 0:
-            pval = 1.0
-        else:
-            if row['CNA'] == 'AMP':
-                pval = (np.sum(perm_scores >= observed) + 1) / (len(perm_scores) + 1)
-            else:
-                pval = (np.sum(perm_scores <= observed) + 1) / (len(perm_scores) + 1)
-        pvals.append(pval)
-    lsa_df['pvalue'] = pvals
-    # FDR correction
-    rejected, pvals_corr = fdr_correction(lsa_df['pvalue'].values, alpha=0.05)
-    lsa_df['adjustp'] = pvals_corr
-    lsa_df['significant'] = rejected
-    # Output segmental LSA results (significant only)
-    sig_lsa_df = lsa_df[lsa_df['significant']].copy()
-
-    # If no significant CNAs, gracefully skip downstream merging/pruning
-    if sig_lsa_df.empty:
-        print("No significant CNAs detected after FDR correction — skipping merging and pruning steps.")
-        merged_out = pd.DataFrame(columns=['region', 'Score', 'pvalue', 'adjustp',
-                                           'cell', 'depth', 'subtreesize', 'CNA'])
-    else:
-        # Build cytoband order map for adjacency-aware merging
-        cytoband_order = {}
-        with open(band_file) as f:
-            for line in f:
-                chrom, start, end, band = line.strip().split('\t')
-                if chrom not in cytoband_order:
-                    cytoband_order[chrom] = []
-                cytoband_order[chrom].append(band)
-
-        # Helper to parse band region names (e.g., chr7:q22.3-q31.2)
-        def parse_band(region):
-            m = re.match(r'(chr\w+):(\w+\.?\d*)(?:-(\w+\.?\d*))?', region)
-            if not m:
-                return None, None, None
-            chrom = m.group(1)
-            start_band = m.group(2)
-            end_band = m.group(3) if m.group(3) else m.group(2)
-            return chrom, start_band, end_band
-
-        # Sort and merge adjacent regions with same cell, CNA, and contiguous bands (using cytoband order)
-        def merge_regions(df):
-            merged = []
-            for (cell, cna), group in df.groupby(['cell', 'CNA']):
-                parsed = group['region'].apply(parse_band)
-                group = group.assign(
-                    chrom=parsed.apply(lambda x: x[0]),
-                    start_band=parsed.apply(lambda x: x[1]),
-                    end_band=parsed.apply(lambda x: x[2])
-                )
-                group = group.sort_values(['chrom', 'start_band'], key=lambda x: x.map(lambda b: cytoband_order.get(group['chrom'].iloc[0], []).index(b) if b in cytoband_order.get(group['chrom'].iloc[0], []) else -1))
-                prev = None
-                for idx, row in group.iterrows():
-                    if prev is None:
-                        prev = row.copy()
-                    else:
-                        # Check adjacency in cytoband order
-                        chrom = row['chrom']
-                        band_list = cytoband_order.get(chrom, [])
-                        try:
-                            prev_end_idx = band_list.index(prev['end_band'])
-                            curr_start_idx = band_list.index(row['start_band'])
-                        except ValueError:
-                            merged.append(prev)
-                            prev = row.copy()
-                            continue
-                        if (chrom == prev['chrom'] and curr_start_idx == prev_end_idx + 1):
-                            prev['end_band'] = row['end_band']
-                            prev['Score'] = (prev['Score'] + row['Score']) / 2
-                            prev['pvalue'] = min(prev['pvalue'], row['pvalue'])
-                            prev['adjustp'] = min(prev['adjustp'], row['adjustp'])
-                            prev['subtreesize'] = max(prev['subtreesize'], row['subtreesize'])
-                        else:
-                            merged.append(prev)
-                            prev = row.copy()
-                if prev is not None:
-                    merged.append(prev)
-            out = []
-            for row in merged:
-                region = f"{row['chrom']}:{row['start_band']}" if row['start_band'] == row['end_band'] else f"{row['chrom']}:{row['start_band']}-{row['end_band']}"
-                out.append({
-                    'region': region,
-                    'Score': row['Score'],
-                    'pvalue': row['pvalue'],
-                    'adjustp': row['adjustp'],
-                    'cell': row['cell'],
-                    'depth': row['depth'],
-                    'subtreesize': row['subtreesize'],
-                    'CNA': row['CNA']
-                })
-            return pd.DataFrame(out)
-
-        merged_out = merge_regions(sig_lsa_df)
-        # Build realcell_df (cell, depth, subtreesize)
-        realcell_df = pd.DataFrame({
-            'cell': list(depths.keys()),
-            'depth': [depths[c] for c in depths]
-        })
-        realcell_df['subtreesize'] = realcell_df['cell'].map(
-            lambda n: len(get_subtree(real_tree, n))
->>>>>>> main
+            n_perms=N_PERMUTATIONS, root=root, debug=debug
         )
         lsa_df['pvalue'] = pvals
     else:
@@ -489,6 +465,30 @@ def main():
         print("No significant CNAs found - empty results saved")
     
     print("\nAnalysis complete!")
+    
+    # Create visualizations
+    print("\nGenerating visualizations...")
+    try:
+        visualizer = MEDALTVisualizer(OUTPUT_PATH)
+        
+        # Plot single cell tree
+        tree_file = os.path.join(OUTPUT_PATH, 'CNV.tree.txt')
+        if os.path.exists(tree_file):
+            visualizer.plot_single_cell_tree(tree_file)
+        
+        # Plot LSA tree if significant results exist
+        lsa_file = os.path.join(OUTPUT_PATH, 'segmental.LSA.txt')
+        if os.path.exists(lsa_file) and not sig_lsa_df.empty:
+            visualizer.plot_lsa_tree(lsa_file, tree_file)
+            
+        # Create comprehensive report
+        visualizer.create_comprehensive_report(tree_file, lsa_file if not sig_lsa_df.empty else None)
+        
+        print("Visualizations complete!")
+        
+    except Exception as e:
+        print(f"Warning: Visualization generation failed: {e}")
+        print("Analysis results are still available in text format.")
 
 if __name__ == "__main__":
     try:
