@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict, deque
 from statsmodels.stats.multitest import multipletests
+import os
 
 def get_subtree(tree, root):
     """
@@ -20,25 +21,22 @@ def get_subtree(tree, root):
 
 def lineage_cfl(cnv_df, lineage_cells):
     """
-    Calculate cumulative fold level (CFL) for a set of cells (lineage) for each feature (bin/gene).
+    Calculate cumulative fold level (CFL) for a set of cells (lineage) for each feature.
     Returns a pandas Series (index: feature, value: mean CNV across lineage).
     """
     return cnv_df.loc[list(lineage_cells)].mean(axis=0)
 
-def lineage_score(cnv_df, lineage_cells, amp_cutoff=0.5, del_cutoff=-0.5):
+def lineage_cfl_per_region(cnv_df, lineage_cells, region):
     """
-    Calculate AMP/DEL scores for a lineage (mean CNV for each feature, split by cutoff).
-    Returns a DataFrame with AMP and DEL scores for each feature.
+    Calculate CFL for a specific region in a lineage.
+    Returns the mean CNV value minus 2 (deviation from diploid).
     """
-    cfl = cnv_df.loc[lineage_cells].mean(axis=0)
-    amp = cfl.where(cfl >= amp_cutoff, 0)
-    dele = cfl.where(cfl <= del_cutoff, 0)
-    return pd.DataFrame({'AMP': amp, 'DEL': dele})
+    lineage_cnvs = cnv_df.loc[list(lineage_cells), region]
+    return lineage_cnvs.mean() - 2
 
 def get_depths(tree, root):
     """
     Compute depth of each node in the tree (distance from root).
-    Returns a dict: node -> depth
     """
     depths = {root: 0}
     queue = deque([(root, 0)])
@@ -53,10 +51,148 @@ def get_depths(tree, root):
 def get_children_count(tree):
     """
     Compute number of children for each node in the tree.
-    Returns a dict: node -> number of children
     """
-    children_count = {node: len(children) for node, children in tree.items()}
+    children_count = {}
+    for node in tree:
+        children_count[node] = len(tree.get(node, {}))
     return children_count
+
+def empirical_pvals_per_region(lsa_df, tree, real_cnv, permut_path, n_perms=500, root='root', debug=False):
+    """
+    Calculate empirical p-values for each (node, region) pair using permuted data.
+    """
+    pvals = []
+    
+    # Group by (cell, region) for efficient lookup
+    obs_scores = {}
+    for _, row in lsa_df.iterrows():
+        key = (row['cell'], row['region'])
+        obs_scores[key] = row['Score']
+    
+    # Collect permuted scores
+    perm_scores = defaultdict(list)
+    
+    if debug:
+        print(f"DEBUG: Loading {n_perms} permutation files...")
+    
+    found_perms = 0
+    for j in range(1, n_perms + 1):
+        perm_cnv_path = os.path.join(permut_path, f"permute.{j}.CNV.txt")
+        if not os.path.exists(perm_cnv_path):
+            continue
+        
+        found_perms += 1
+        perm_cnv = pd.read_csv(perm_cnv_path, sep="\t", index_col=0)
+        
+        # For each node in the tree
+        for node in tree:
+            if node == root:
+                continue
+            
+            lineage = get_subtree(tree, node)
+            lineage = [cell for cell in lineage if cell != 'root']
+            
+            if len(lineage) < 5:
+                continue
+            
+            # Calculate score for each region
+            for region in perm_cnv.columns:
+                if region in real_cnv.columns:  # Only consider regions that exist in real data
+                    lineage_cnvs = perm_cnv.loc[lineage, region]
+                    score = lineage_cnvs.mean() - 2
+                    perm_scores[(node, region)].append(score)
+    
+    if debug:
+        print(f"DEBUG: Found {found_perms} permutation files")
+        print(f"DEBUG: Collected permutation scores for {len(perm_scores)} (node, region) pairs")
+    
+    # Calculate p-values
+    for _, row in lsa_df.iterrows():
+        key = (row['cell'], row['region'])
+        observed = row['Score']
+        perm_vals = np.array(perm_scores.get(key, []))
+        
+        if len(perm_vals) == 0:
+            pval = 1.0
+        else:
+            # Two-tailed test
+            if observed > 0:  # Amplification
+                pval = (np.sum(perm_vals >= observed) + 1) / (len(perm_vals) + 1)
+            else:  # Deletion
+                pval = (np.sum(perm_vals <= observed) + 1) / (len(perm_vals) + 1)
+        
+        pvals.append(pval)
+    
+    if debug:
+        pval_array = np.array(pvals)
+        print(f"DEBUG: P-value distribution: min={pval_array.min():.4f}, "
+              f"median={np.median(pval_array):.4f}, max={pval_array.max():.4f}")
+        print(f"DEBUG: P-values < 0.05: {np.sum(pval_array < 0.05)}")
+    
+    return pvals
+
+def fdr_correction(pvals, alpha=0.05):
+    """
+    Benjamini-Hochberg FDR correction.
+    """
+    pvals = np.asarray(pvals, dtype=float)
+    if pvals.size == 0:
+        return np.array([], dtype=bool), np.array([], dtype=float)
+    
+    # Handle case where all p-values are 1
+    if np.all(pvals == 1):
+        return np.zeros(len(pvals), dtype=bool), pvals
+    
+    rejected, pvals_corr, _, _ = multipletests(pvals, alpha=alpha, method='fdr_bh')
+    return rejected, pvals_corr
+
+def refine_cna(res_df, tree, realcell_df):
+    """
+    Remove redundant lineages: if two lineages have the same CNA and one is a subset of another.
+    """
+    if res_df.empty:
+        return res_df
+    
+    keep_idx = []
+    
+    # Group by region and CNA type
+    for (region, cna_type), group in res_df.groupby(['region', 'CNA']):
+        # Build lineage sets for this region/CNA
+        lineage_sets = {}
+        for _, row in group.iterrows():
+            cell = row['cell']
+            lineage = get_subtree(tree, cell)
+            lineage_sets[cell] = lineage
+        
+        cells = list(lineage_sets.keys())
+        redundant = set()
+        
+        # Find redundant (subset) lineages
+        for i, c1 in enumerate(cells):
+            if c1 in redundant:
+                continue
+            for j, c2 in enumerate(cells):
+                if i == j or c2 in redundant:
+                    continue
+                # If c1 is a subset of c2, mark c1 as redundant
+                if lineage_sets[c1].issubset(lineage_sets[c2]) and lineage_sets[c1] != lineage_sets[c2]:
+                    redundant.add(c1)
+                    break
+        
+        # Keep non-redundant cells
+        keep_cells = [c for c in cells if c not in redundant]
+        keep_idx.extend(group[group['cell'].isin(keep_cells)].index.tolist())
+    
+    return res_df.loc[keep_idx].reset_index(drop=True)
+
+def lineage_score(cnv_df, lineage_cells, amp_cutoff=0.5, del_cutoff=-0.5):
+    """
+    Calculate AMP/DEL scores for a lineage.
+    """
+    cfl = cnv_df.loc[lineage_cells].mean(axis=0)
+    amp = cfl.where(cfl >= amp_cutoff, 0)
+    dele = cfl.where(cfl <= del_cutoff, 0)
+    return pd.DataFrame({'AMP': amp, 'DEL': dele})
 
 def split_tree(tree, node):
     """
@@ -64,102 +200,17 @@ def split_tree(tree, node):
     """
     return get_subtree(tree, node)
 
-def find_nas(x):
-    """
-    Utility to check for NAs in a vector (returns 0 if any NA, else 1).
-    """
-    return 0 if pd.isnull(x).any() else 1
-
-def refine_cna(res_df, tree, realcell_df):
-    """
-    Remove redundant lineages: if two lineages are associated with the same CNA and one lineage's cell-set is a subset of another's, drop the smaller.
-    Keep all maximal (non-subset) lineages per region.
-    """
-    keep_idx = []
-    for region in res_df['region'].unique():
-        sub = res_df[res_df['region'] == region]
-        # Build lineage sets
-        lineage_sets = {row['cell']: split_tree(tree, row['cell']) for _, row in sub.iterrows()}
-        cells = list(lineage_sets.keys())
-        redundant = set()
-        for i, c1 in enumerate(cells):
-            for j, c2 in enumerate(cells):
-                if i == j or c2 in redundant:
-                    continue
-                if lineage_sets[c1].issubset(lineage_sets[c2]):
-                    redundant.add(c1)
-                    break
-        keep_cells = [c for c in cells if c not in redundant]
-        keep_idx.extend(sub[sub['cell'].isin(keep_cells)].index.tolist())
-    return res_df.loc[keep_idx].reset_index(drop=True)
-
-def merge_lsa(res_df, tree, realcell_df):
-    """
-    Merge overlapping significant CNAs (basic version).
-    res_df: DataFrame with columns ['cell', 'region', ...]
-    tree: dict of dicts
-    realcell_df: DataFrame with cell info (must include 'cell' and 'depth')
-    Returns: merged DataFrame
-    """
-    # This is a placeholder for more advanced merging logic
-    return res_df.drop_duplicates(['cell', 'region'])
-
-def compute_lsa(tree, cnv_df, root):
-    """
-    For each non-root node, extract the lineage (subtree), calculate CFL for each feature.
-    Returns a DataFrame: columns=[cell, depth, subtreesize, feature, cfl]
-    """
-    results = []
-    for node in tree:
-        if node == root:
-            continue
-        lineage = get_subtree(tree, node)
-        cfl = lineage_cfl(cnv_df, lineage)
-        results.append(pd.DataFrame({
-            'cell': node,
-            'depth': np.nan,  # to be filled if needed
-            'subtreesize': len(lineage),
-            'feature': cfl.index,
-            'cfl': cfl.values
-        }))
-    return pd.concat(results, ignore_index=True)
-
-def empirical_pvals(observed, permuted, alternative='greater'):
-    """
-    Compute empirical p-values for observed values vs. permutation background.
-    observed: array-like, shape (n,)
-    permuted: array-like, shape (n, n_perm)
-    alternative: 'greater' or 'less'
-    Returns: array of p-values
-    """
-    n_perm = permuted.shape[1]
-    if alternative == 'greater':
-        pvals = (np.sum(permuted >= observed[:, None], axis=1) + 1) / (n_perm + 1)
-    else:
-        pvals = (np.sum(permuted <= observed[:, None], axis=1) + 1) / (n_perm + 1)
-    return pvals
-
-def fdr_correction(pvals, alpha=0.05):
-    """
-    Benjamini-Hochberg FDR correction.
-    If the input array is empty, returns two empty arrays.
-    """
-    pvals = np.asarray(pvals, dtype=float)
-    if pvals.size == 0:
-        return np.array([], dtype=bool), np.array([], dtype=float)
-    rejected, pvals_corr, _, _ = multipletests(pvals, alpha=alpha, method='fdr_bh')
-    return rejected, pvals_corr
-
-def collect_significant_cnas(lsa_df, pval_col='pval', alpha=0.05):
+def collect_significant_cnas(lsa_df, pval_col='pvalue', alpha=0.05):
     """
     Collect significant CNAs after FDR correction.
-    lsa_df: DataFrame with columns including 'feature', 'cell', 'cfl', 'pval'
-    Returns: DataFrame of significant CNAs
     """
     rejected, pvals_corr = fdr_correction(lsa_df[pval_col].values, alpha=alpha)
-    lsa_df['fdr'] = pvals_corr
+    lsa_df['adjustp'] = pvals_corr
     lsa_df['significant'] = rejected
     return lsa_df[lsa_df['significant']].copy()
 
-# Build cytoband order map for adjacency-aware merging
-# (remove all code below) 
+def find_nas(x):
+    """
+    Utility to check for NAs in a vector.
+    """
+    return 0 if pd.isnull(x).any() else 1
