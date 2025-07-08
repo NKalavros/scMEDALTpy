@@ -84,6 +84,12 @@ def empirical_pvals_per_region(lsa_df, tree, real_cnv, permut_path, n_perms=500,
         found_perms += 1
         perm_cnv = pd.read_csv(perm_cnv_path, sep="\t", index_col=0)
         
+        if debug and j == 1:  # Debug first permutation file
+            print(f"DEBUG: Permutation columns: {list(perm_cnv.columns)}")
+            print(f"DEBUG: Real columns: {list(real_cnv.columns)}")
+            common_regions = set(perm_cnv.columns) & set(real_cnv.columns)
+            print(f"DEBUG: Common regions: {list(common_regions)}")
+        
         # For each node in the tree
         for node in tree:
             if node == root:
@@ -95,12 +101,12 @@ def empirical_pvals_per_region(lsa_df, tree, real_cnv, permut_path, n_perms=500,
             if len(lineage) < 5:
                 continue
             
-            # Calculate score for each region
-            for region in perm_cnv.columns:
-                if region in real_cnv.columns:  # Only consider regions that exist in real data
-                    lineage_cnvs = perm_cnv.loc[lineage, region]
-                    score = lineage_cnvs.mean() - 2
-                    perm_scores[(node, region)].append(score)
+            # Calculate score for each region - use only regions that exist in both
+            common_regions = set(perm_cnv.columns) & set(real_cnv.columns)
+            for region in common_regions:
+                lineage_cnvs = perm_cnv.loc[lineage, region]
+                score = lineage_cnvs.mean() - 2
+                perm_scores[(node, region)].append(score)
     
     if debug:
         print(f"DEBUG: Found {found_perms} permutation files")
@@ -187,12 +193,47 @@ def refine_cna(res_df, tree, realcell_df):
 
 def lineage_score(cnv_df, lineage_cells, amp_cutoff=0.5, del_cutoff=-0.5):
     """
-    Calculate AMP/DEL scores for a lineage.
+    Calculate AMP/DEL scores for a lineage using R's exact algorithm.
+    This matches the lineageScore function in LSAfunction.R lines 709-733.
     """
-    cfl = cnv_df.loc[lineage_cells].mean(axis=0)
-    amp = cfl.where(cfl >= amp_cutoff, 0)
-    dele = cfl.where(cfl <= del_cutoff, 0)
-    return pd.DataFrame({'AMP': amp, 'DEL': dele})
+    subcnv = cnv_df.loc[lineage_cells]
+    total_cells = len(lineage_cells)
+    
+    # Initialize result arrays
+    amp_scores = []
+    del_scores = []
+    
+    # Process each region (column)
+    for region in subcnv.columns:
+        x = subcnv[region].values
+        
+        # Count cells with amplifications (>2) and deletions (<2)
+        f1 = len(x[x > 2])  # amplification count
+        f2 = len(x[x < 2])  # deletion count
+        
+        # Calculate amplification score (R logic)
+        if f1 > 1:
+            Gamp = f1 * np.mean(x[x > 2] - 2) / total_cells
+        elif f1 == 1:
+            Gamp = f1 * (x[x > 2] - 2)[0] / total_cells
+        else:
+            Gamp = 0
+            
+        # Calculate deletion score (R logic)
+        if f2 > 1:
+            Gdel = f2 * np.mean(x[x < 2] - 2) / total_cells
+        elif f2 == 1:
+            Gdel = f2 * (x[x < 2] - 2)[0] / total_cells
+        else:
+            Gdel = 0
+            
+        amp_scores.append(Gamp)
+        del_scores.append(Gdel)
+    
+    return pd.DataFrame({
+        'AMP': amp_scores, 
+        'DEL': del_scores
+    }, index=subcnv.columns)
 
 def split_tree(tree, node):
     """

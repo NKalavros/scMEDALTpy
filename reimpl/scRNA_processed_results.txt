@@ -1,0 +1,19 @@
+# MEDALT Python Reimplementation Results
+# Generated: 2025-06-26 11:30:43
+# Input: ../MEDALT/example/scRNA.CNV.txt.CNV.txt
+# Root: chr7_1
+# Nodes: 9
+# MST Weight: 0
+# Format: from_cell	to_cell	distance
+#
+from	to	dist
+chr7_1	chr7_2	0
+chr7_1	chr8_1	0
+chr7_1	chr8_2	0
+chr7_1	chr10_1	0
+chr7_1	chr10_2	0
+chr7_1	chr12_1	0
+chr7_1	chr12_2	0
+chr7_1	chr12_3	0
+#
+# Total edges: 8

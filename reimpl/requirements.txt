@@ -1,0 +1,20 @@
+# MEDALT Python Reimplementation Dependencies
+
+# Core dependencies (required)
+pandas>=1.0.0
+numpy>=1.18.0
+
+# Visualization dependencies (optional but recommended)
+matplotlib>=3.0.0
+networkx>=2.4
+seaborn>=0.10.0
+
+# Statistical analysis dependencies
+scipy>=1.5.0
+
+# Optional: Enhanced graph layouts
+# pygraphviz>=1.5  # Uncomment for better hierarchical layouts
+# plotly>=4.0.0    # Uncomment for interactive visualizations
+
+# Installation:
+# pip install pandas numpy matplotlib networkx seaborn
