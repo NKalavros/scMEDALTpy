@@ -1,1 +1,0 @@
-region	Score	pvalue	adjustp	cell	depth	subtreesize	CNA
