@@ -291,7 +291,7 @@ class MEDALTPipeline:
         
         # Load data
         if data_type == 'R':
-            cnv_matrix, cell_names, bin_names = load_scRNA_data(input_file, window_size)
+            cnv_matrix, cell_names, gene_names = load_scRNA_data(input_file, window_size)
         else:
             # For scDNA-seq, implement appropriate loader
             raise NotImplementedError("scDNA-seq data loading not yet implemented")
@@ -312,13 +312,13 @@ class MEDALTPipeline:
         # Run LSA
         logger.info("Running Lineage Speciation Analysis...")
         lsa = LineageSpeciationAnalysis(tree, cnv_matrix, chr_boundaries, n_permutations)
-        lsa_results = lsa.run_analysis(min_lineage_size, n_jobs)
+        lsa_results = lsa.run_analysis(min_lineage_size, n_jobs, gene_names)
         
-        # Map bins to genomic locations
-        if not lsa_results.empty:
+        # Map bins to genomic locations (only if using windowed data)
+        if not lsa_results.empty and window_size > 1:
             lsa_results['genomic_location'] = lsa_results['region'].apply(
                 lambda x: chr_mapper.bin_to_genomic_location(
-                    int(x.split('_')[1]), cnv_matrix.shape[1]
+                    gene_names.index(x) if x in gene_names else 0, cnv_matrix.shape[1]
                 )
             )
         
@@ -360,7 +360,7 @@ class MEDALTPipeline:
     def _save_tree(self, tree: nx.DiGraph, output_file: str, cell_names: List[str] = None):
         """Save tree in MEDALT format"""
         with open(output_file, 'w') as f:
-            f.write("parent\tchild\tdistance\n")
+            f.write("from\tto\tdist\n")
             for parent, child, data in tree.edges(data=True):
                 parent_name = parent if parent == 'root' else f'cell_{parent}'
                 child_name = f'cell_{child}'
@@ -370,7 +370,7 @@ class MEDALTPipeline:
                 if cell_names and isinstance(child, int):
                     child_name = cell_names[child]
                 
-                f.write(f"{parent_name}\t{child_name}\t{data['weight']:.2f}\n")
+                f.write(f"{parent_name}\t{child_name}\t{int(data['weight'])}\n")
     
     def _aggregate_to_segments(self, lsa_results: pd.DataFrame) -> pd.DataFrame:
         """Aggregate bin-level results to chromosome segments"""

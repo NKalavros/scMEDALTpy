@@ -139,7 +139,7 @@ class MEDALT:
         return mst
     
     def _compute_distance_matrix(self) -> Dict:
-        """Compute all pairwise MEDs"""
+        """Compute all pairwise MEDs (asymmetric)"""
         distances = defaultdict(dict)
         
         # Distances from root
@@ -149,11 +149,11 @@ class MEDALT:
                 self._distance_cache[key] = MED.compute(self.root_profile, self.cnv_matrix[i])
             distances[self.root_id][i] = self._distance_cache[key]
         
-        # Pairwise distances between cells
+        # Pairwise distances between cells (asymmetric)
         for i in range(self.n_cells):
             for j in range(self.n_cells):
                 if i != j:
-                    key = (i, j) if i < j else (j, i)
+                    key = (i, j)  # Keep directional - MED(i,j) != MED(j,i)
                     if key not in self._distance_cache:
                         self._distance_cache[key] = MED.compute(self.cnv_matrix[i], self.cnv_matrix[j])
                     distances[i][j] = self._distance_cache[key]
@@ -206,7 +206,7 @@ class LineageSpeciationAnalysis:
     
     def __init__(self, tree: nx.DiGraph, cnv_matrix: np.ndarray, 
                  chromosome_boundaries: List[Tuple[int, int]] = None,
-                 n_permutations: int = 500):
+                 n_permutations: int = 500, data_type: str = 'RNA'):
         """
         Initialize LSA
         
@@ -215,11 +215,13 @@ class LineageSpeciationAnalysis:
             cnv_matrix: n_cells × n_bins integer matrix
             chromosome_boundaries: List of (start, end) tuples for chromosomes
             n_permutations: Number of permutations for background distribution
+            data_type: 'RNA' for scRNA-seq, 'DNA' for scDNA-seq
         """
         self.tree = tree
         self.cnv_matrix = cnv_matrix.astype(int)
         self.n_cells, self.n_bins = cnv_matrix.shape
         self.n_permutations = n_permutations
+        self.data_type = data_type
         
         # Set up chromosome boundaries
         if chromosome_boundaries is None:
@@ -228,9 +230,9 @@ class LineageSpeciationAnalysis:
         else:
             self.chromosome_boundaries = chromosome_boundaries
         
-        logger.info(f"Initialized LSA with {n_permutations} permutations")
+        logger.info(f"Initialized LSA with {n_permutations} permutations, data_type={data_type}")
     
-    def run_analysis(self, min_lineage_size: int = 5, n_jobs: int = -1) -> pd.DataFrame:
+    def run_analysis(self, min_lineage_size: int = 5, n_jobs: int = -1, gene_names: List[str] = None) -> pd.DataFrame:
         """
         Run complete LSA pipeline
         
@@ -243,8 +245,12 @@ class LineageSpeciationAnalysis:
         """
         # Step 1: Dissect tree into lineages
         logger.info("Dissecting tree into lineages...")
-        lineages = self._dissect_tree(min_lineage_size)
-        logger.info(f"Found {len(lineages)} lineages")
+        initial_lineages = self._dissect_tree(min_lineage_size)
+        logger.info(f"Found {len(initial_lineages)} initial lineages")
+        
+        # Step 1.5: Refine lineages to remove nested/redundant ones
+        lineages = self._refine_lineages(initial_lineages)
+        logger.info(f"Using {len(lineages)} refined lineages")
         
         if not lineages:
             logger.warning("No lineages found!")
@@ -263,7 +269,7 @@ class LineageSpeciationAnalysis:
         results = self._calculate_pvalues(observed_cfls, background_cfls, lineages)
         
         # Step 5: Format output
-        return self._format_results(results)
+        return self._format_results(results, gene_names)
     
     def _dissect_tree(self, min_size: int = 5) -> List[Dict]:
         """Partition tree into disjoint lineages"""
@@ -376,11 +382,12 @@ class LineageSpeciationAnalysis:
         
         # Create new LSA instance for permuted data
         perm_lsa = LineageSpeciationAnalysis(perm_tree, permuted_matrix, 
-                                             self.chromosome_boundaries, 0)
+                                             self.chromosome_boundaries, 0, self.data_type)
         
         # Dissect permuted tree
         min_size = min(lin['size'] for lin in original_lineages)
-        perm_lineages = perm_lsa._dissect_tree(min_size)
+        perm_initial_lineages = perm_lsa._dissect_tree(min_size)
+        perm_lineages = perm_lsa._refine_lineages(perm_initial_lineages)
         
         # Calculate CFLs for permuted data
         background_cfls = defaultdict(list)
@@ -406,13 +413,23 @@ class LineageSpeciationAnalysis:
         return dict(background_cfls)
     
     def _permute_by_chromosome(self) -> np.ndarray:
-        """Permute CNV matrix by chromosome"""
+        """Permute CNV matrix by chromosome with data-type specific strategy"""
         permuted = self.cnv_matrix.copy()
         
-        for chr_start, chr_end in self.chromosome_boundaries:
-            # Shuffle cell assignments within chromosome
-            shuffled_indices = np.random.permutation(self.n_cells)
-            permuted[:, chr_start:chr_end] = self.cnv_matrix[shuffled_indices][:, chr_start:chr_end]
+        if self.data_type == 'DNA':
+            # For DNA-seq: permute chromosomal segments across cells
+            for chr_start, chr_end in self.chromosome_boundaries:
+                # Shuffle cell assignments within chromosome
+                shuffled_indices = np.random.permutation(self.n_cells)
+                permuted[:, chr_start:chr_end] = self.cnv_matrix[shuffled_indices][:, chr_start:chr_end]
+        
+        elif self.data_type == 'RNA':
+            # For RNA-seq: permute genes within same chromosome across cells
+            for chr_start, chr_end in self.chromosome_boundaries:
+                # Permute each gene position independently within chromosome
+                for gene_pos in range(chr_start, chr_end):
+                    shuffled_indices = np.random.permutation(self.n_cells)
+                    permuted[:, gene_pos] = self.cnv_matrix[shuffled_indices, gene_pos]
         
         return permuted
     
@@ -470,31 +487,101 @@ class LineageSpeciationAnalysis:
         nearest_size = min(available_sizes, key=lambda x: abs(x - target_size))
         return background_cfls[(nearest_size, bin_idx, direction)]
     
-    def _format_results(self, results: Dict) -> pd.DataFrame:
+    def _benjamini_hochberg_correction(self, pvalues: np.ndarray) -> np.ndarray:
+        """Manual implementation of Benjamini-Hochberg FDR correction"""
+        pvalues = np.array(pvalues)
+        n = len(pvalues)
+        
+        # Sort p-values and keep track of original indices
+        sorted_indices = np.argsort(pvalues)
+        sorted_pvals = pvalues[sorted_indices]
+        
+        # Apply BH correction
+        adjusted_pvals = np.zeros_like(sorted_pvals)
+        for i in range(n-1, -1, -1):
+            if i == n-1:
+                adjusted_pvals[i] = sorted_pvals[i]
+            else:
+                adjusted_pvals[i] = min(adjusted_pvals[i+1], 
+                                      sorted_pvals[i] * n / (i + 1))
+        
+        # Restore original order
+        result = np.zeros_like(pvalues)
+        result[sorted_indices] = adjusted_pvals
+        
+        return result
+    
+    def _refine_lineages(self, lineages: List[Dict]) -> List[Dict]:
+        """Remove nested/redundant lineages similar to RefineCNA() in original R code"""
+        refined_lineages = []
+        
+        # Sort lineages by size (largest first)
+        sorted_lineages = sorted(lineages, key=lambda x: x['size'], reverse=True)
+        
+        for lineage in sorted_lineages:
+            is_nested = False
+            lineage_cells = set(lineage['cells'])
+            
+            # Check if this lineage is nested within any already selected lineage
+            for selected in refined_lineages:
+                selected_cells = set(selected['cells'])
+                
+                # If this lineage is a subset of a selected lineage, it's nested
+                if lineage_cells.issubset(selected_cells):
+                    is_nested = True
+                    break
+                
+                # If overlap is too large, consider it redundant
+                overlap = len(lineage_cells.intersection(selected_cells))
+                if overlap > 0.7 * min(len(lineage_cells), len(selected_cells)):
+                    is_nested = True
+                    break
+            
+            if not is_nested:
+                refined_lineages.append(lineage)
+        
+        logger.info(f"Refined {len(lineages)} lineages to {len(refined_lineages)} non-redundant lineages")
+        return refined_lineages
+    
+    def _format_results(self, results: Dict, gene_names: List[str] = None) -> pd.DataFrame:
         """Format results as DataFrame"""
         rows = []
         
         for (lineage_id, bin_idx, direction), stats in results.items():
-            # Skip non-significant results for cleaner output
-            if stats['pvalue'] > 0.05:
-                continue
+            # Get gene name
+            if gene_names and bin_idx < len(gene_names):
+                region_name = gene_names[bin_idx]
+            else:
+                region_name = f'bin_{bin_idx}'
+            
+            # Calculate score as normalized CFL
+            score = (stats['cfl'] / stats['size']) - 2  # Subtract diploid baseline
             
             rows.append({
-                'region': f'bin_{bin_idx}',  # Would map to actual genomic coordinates
-                'score': stats['cfl'] / stats['size'],  # Average CFL
+                'region': region_name,
+                'Score': score,
                 'pvalue': stats['pvalue'],
-                'cell': f'cell_{lineage_id}' if isinstance(lineage_id, int) else lineage_id,
+                'cell': f'{lineage_id}' if isinstance(lineage_id, str) else f'cell_{lineage_id}',
                 'depth': stats['depth'],
                 'subtreesize': stats['size'],
-                'CNA': direction,
-                'n_background': stats['n_background']
+                'CNA': direction
             })
         
         df = pd.DataFrame(rows)
         
         if not df.empty:
-            # Add FDR correction
-            df['adjustp'] = stats.multitest.fdrcorrection(df['pvalue'])[1]
+            # Add Benjamini-Hochberg FDR correction
+            try:
+                from scipy.stats import false_discovery_control
+                df['adjustp'] = false_discovery_control(df['pvalue'], method='bh')
+            except ImportError:
+                # Fallback to statsmodels if scipy version is too old
+                try:
+                    from statsmodels.stats.multitest import fdrcorrection
+                    _, df['adjustp'] = fdrcorrection(df['pvalue'], method='indep')
+                except ImportError:
+                    # Manual Benjamini-Hochberg implementation
+                    df['adjustp'] = self._benjamini_hochberg_correction(df['pvalue'])
             
             # Sort by adjusted p-value
             df = df.sort_values('adjustp')
@@ -511,15 +598,16 @@ def load_scRNA_data(filepath: str, window_size: int = 30) -> Tuple[np.ndarray, L
         window_size: Number of genes to average per window
         
     Returns:
-        cnv_matrix: Integer copy number matrix
+        cnv_matrix: Integer copy number matrix (cells x genes)
         cell_names: List of cell names
-        bin_names: List of genomic bin identifiers
+        gene_names: List of gene names
     """
     logger.info(f"Loading data from {filepath}")
     
     # Read the data
     df = pd.read_csv(filepath, sep='\t', index_col=0)
     
+    # Data is already in correct format: genes as rows, cells as columns
     # Convert from relative to absolute copy numbers
     # inferCNV outputs: 0.5 = CN1, 1.0 = CN2, 1.5 = CN3, etc.
     cn_matrix = np.round(df.values * 2).astype(int)
@@ -530,22 +618,27 @@ def load_scRNA_data(filepath: str, window_size: int = 30) -> Tuple[np.ndarray, L
     n_cells, n_genes = cn_matrix.shape
     logger.info(f"Loaded {n_cells} cells and {n_genes} genes")
     
-    # Window averaging
-    n_windows = n_genes // window_size
-    windowed_matrix = np.zeros((n_cells, n_windows), dtype=int)
-    
-    for i in range(n_windows):
-        start = i * window_size
-        end = min((i + 1) * window_size, n_genes)
-        # Average and round
-        windowed_matrix[:, i] = np.round(np.mean(cn_matrix[:, start:end], axis=1))
-    
-    logger.info(f"Reduced to {n_windows} windows using window size {window_size}")
-    
     cell_names = df.columns.tolist()
-    bin_names = [f'window_{i}' for i in range(n_windows)]
+    gene_names = df.index.tolist()
     
-    return windowed_matrix, cell_names, bin_names
+    # If windowing is requested, apply it
+    if window_size > 1 and window_size < n_genes:
+        n_windows = n_genes // window_size
+        windowed_matrix = np.zeros((n_cells, n_windows), dtype=int)
+        windowed_genes = []
+        
+        for i in range(n_windows):
+            start = i * window_size
+            end = min((i + 1) * window_size, n_genes)
+            # Average and round
+            windowed_matrix[:, i] = np.round(np.mean(cn_matrix[:, start:end], axis=1))
+            # Use first gene name in window as representative
+            windowed_genes.append(gene_names[start])
+        
+        logger.info(f"Reduced to {n_windows} windows using window size {window_size}")
+        return windowed_matrix, cell_names, windowed_genes
+    
+    return cn_matrix, cell_names, gene_names
 
 
 def main():
@@ -553,8 +646,8 @@ def main():
     import sys
     
     # Load example data
-    filepath = 'example/scRNA.CNV.txt'
-    cnv_matrix, cell_names, bin_names = load_scRNA_data(filepath)
+    filepath = 'scRNA.CNV.txt'
+    cnv_matrix, cell_names, gene_names = load_scRNA_data(filepath, window_size=1)
     
     # Build MEDALT tree
     logger.info("Building MEDALT tree...")
@@ -563,16 +656,18 @@ def main():
     
     # Save tree
     with open('CNV.tree.txt', 'w') as f:
-        f.write("parent\tchild\tdistance\n")
+        f.write("from\tto\tdist\n")
         for parent, child, data in tree.edges(data=True):
-            f.write(f"{parent}\t{child}\t{data['weight']:.2f}\n")
+            parent_name = parent if parent == 'root' else cell_names[parent]
+            child_name = cell_names[child]
+            f.write(f"{parent_name}\t{child_name}\t{int(data['weight'])}\n")
     
     logger.info("Tree saved to CNV.tree.txt")
     
     # Run LSA
     logger.info("Running Lineage Speciation Analysis...")
     lsa = LineageSpeciationAnalysis(tree, cnv_matrix, n_permutations=500)
-    results = lsa.run_analysis(min_lineage_size=5, n_jobs=-1)
+    results = lsa.run_analysis(min_lineage_size=5, n_jobs=-1, gene_names=gene_names)
     
     # Save results
     if not results.empty:
