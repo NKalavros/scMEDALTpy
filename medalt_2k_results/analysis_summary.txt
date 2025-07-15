@@ -1,0 +1,12 @@
+MEDALT Analysis Summary
+======================
+
+Dataset: 2000 cells x 1000 genes
+Processing time: 410.3 seconds (6.84 minutes)
+Matrix size: 2000x2000
+
+Distance Statistics:
+Total distances: 1999000
+Min distance: 1000000.000000
+Max distance: 1000000.000000
+Mean distance: 1000000.000000
